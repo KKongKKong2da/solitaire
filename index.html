@@ -227,20 +227,20 @@
   .card .corner {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
+    align-items: center;   /* 숫자 아래 무늬를 (좌우 정렬이 아니라) 세로로 가운데 정렬 */
     line-height: 1;
-    font-size: calc(var(--card-w) * 0.2);
+    width: fit-content;    /* 내용만큼만 차지 → 카드 왼쪽 위 모서리에 고정 */
+    /* 비율대로 키우되, 작은 폰에서 너무 작아지지 않게 최소 크기 보장 */
+    font-size: max(11px, calc(var(--card-w) * 0.23));
   }
-  .card .corner .suit { font-size: calc(var(--card-w) * 0.185); }
+  .card .corner .suit { font-size: max(10px, calc(var(--card-w) * 0.205)); }
   .card .pip {
     position: absolute;
     inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: calc(var(--card-w) * 0.46);
+    font-size: max(20px, calc(var(--card-w) * 0.5));
   }
   .card.down {
     background: repeating-linear-gradient(45deg, #2b5fa8 0 8px, #23507f 8px 16px);
