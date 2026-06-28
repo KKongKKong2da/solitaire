@@ -218,6 +218,7 @@
     padding: calc(var(--card-w) * 0.07) calc(var(--card-w) * 0.1);
     font-weight: 700;
     cursor: grab;
+    touch-action: none;   /* 터치 드래그를 JS가 직접 처리 (브라우저 스크롤/확대 방지) */
   }
   /* In top row piles cards are not absolutely stacked vertically */
   #top .card { position: absolute; top: 0; left: 0; }
@@ -227,9 +228,10 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: center;
+    text-align: center;
     line-height: 1;
     font-size: calc(var(--card-w) * 0.2);
-    width: fit-content;
   }
   .card .corner .suit { font-size: calc(var(--card-w) * 0.185); }
   .card .pip {
@@ -254,6 +256,20 @@
     border: 2px solid rgba(255, 255, 255, 0.25);
   }
   .card.dragging { opacity: .5; }
+
+  /* 터치 드래그용 떠 있는 카드(고스트)와 드롭 대상 강조 */
+  .drag-ghost {
+    position: fixed;
+    z-index: 1000;
+    pointer-events: none;
+    opacity: .92;
+    filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.45));
+  }
+  .drop-hover {
+    outline: 3px solid rgba(247, 208, 112, 0.95);
+    outline-offset: 2px;
+    border-radius: 10px;
+  }
 
   .hint {
     animation: blinkFrom 0.7s ease-in-out infinite;
@@ -1916,6 +1932,164 @@ function handleDropToFound(suit) {
 }
 
 /* ===========================================================
+   (D-2) 터치 드래그 — 모바일/태블릿 대응
+   HTML5 드래그앤드롭은 터치 화면에서 동작하지 않으므로
+   touch 이벤트로 직접 끌어다 놓기를 구현한다. (PC 마우스는 기존 DnD 사용)
+   - 손가락을 조금 움직이면 카드(묶음)가 손가락을 따라오고,
+     떼는 위치의 열/파운데이션에 놓는다.
+   - 움직임 없이 두 번 두드리면(더블탭) 파운데이션으로 자동 이동.
+=========================================================== */
+let TOUCH = null;
+let touchHover = null;
+let lastTap = { key: "", t: 0 };
+
+function touchSrcFromEl(el) {
+  if (!el) return null;
+  if (el.dataset.area === "tab") return { type: "tab", col: +el.dataset.col, idx: +el.dataset.idx };
+  if (el.dataset.area === "waste") return { type: "waste" };
+  if (el.dataset.area === "found") return { type: "foundation", suit: +el.dataset.suit };
+  return null;
+}
+
+// 끌리는 카드 DOM 목록 (타블로는 idx부터 끝까지 묶음, 그 외엔 카드 한 장)
+function touchOriginEls(src, startEl) {
+  if (src.type === "tab") {
+    const p = S.game.tab[src.col];
+    const els = [];
+    for (let i = src.idx; i < p.length; i++) {
+      const e = $(`card-${src.col}-${i}`);
+      if (e) els.push(e);
+    }
+    return els.length ? els : [startEl];
+  }
+  return [startEl];
+}
+
+function buildTouchGhost(els) {
+  const ghost = document.createElement("div");
+  ghost.className = "drag-ghost";
+  const r0 = els[0].getBoundingClientRect();
+  ghost.style.width = r0.width + "px";
+  els.forEach((el) => {
+    const r = el.getBoundingClientRect();
+    const clone = el.cloneNode(true);
+    clone.classList.remove("dragging", "hint", "hint-target");
+    clone.style.position = "absolute";
+    clone.style.left = "0px";
+    clone.style.top = (r.top - r0.top) + "px";
+    clone.style.width = r.width + "px";
+    clone.style.height = r.height + "px";
+    ghost.appendChild(clone);
+  });
+  document.body.appendChild(ghost);
+  return ghost;
+}
+
+function zoneAtPoint(x, y) {
+  if (TOUCH && TOUCH.ghost) TOUCH.ghost.style.visibility = "hidden";
+  const el = document.elementFromPoint(x, y);
+  if (TOUCH && TOUCH.ghost) TOUCH.ghost.style.visibility = "";
+  if (!el || !el.closest) return null;
+  return el.closest(".col") || el.closest(".found");
+}
+
+function clearTouchHover() {
+  if (touchHover) { touchHover.classList.remove("drop-hover"); touchHover = null; }
+}
+
+function cleanupTouchDrag(cur) {
+  if (cur.ghost && cur.ghost.parentNode) cur.ghost.parentNode.removeChild(cur.ghost);
+  if (cur.originEls) cur.originEls.forEach((el) => el && el.classList.remove("dragging"));
+  clearTouchHover();
+}
+
+function onTouchStart(e) {
+  if (e.touches.length !== 1) { TOUCH = null; return; }
+  const cardEl = e.target.closest && e.target.closest(".card");
+  const src = cardEl ? touchSrcFromEl(cardEl) : null;
+  if (!src) { TOUCH = null; return; }
+  const t = e.touches[0];
+  const r = cardEl.getBoundingClientRect();
+  TOUCH = {
+    src,
+    startEl: cardEl,
+    startX: t.clientX,
+    startY: t.clientY,
+    grabX: t.clientX - r.left,
+    grabY: t.clientY - r.top,
+    moved: false,
+    ghost: null,
+    originEls: null,
+  };
+}
+
+function onTouchMove(e) {
+  if (!TOUCH) return;
+  const t = e.touches[0];
+  if (!t) return;
+  if (!TOUCH.moved) {
+    if (Math.hypot(t.clientX - TOUCH.startX, t.clientY - TOUCH.startY) < 8) return;
+    TOUCH.moved = true;
+    TOUCH.originEls = touchOriginEls(TOUCH.src, TOUCH.startEl);
+    TOUCH.ghost = buildTouchGhost(TOUCH.originEls);
+    TOUCH.originEls.forEach((el) => el.classList.add("dragging"));
+    clearHints();
+  }
+  e.preventDefault();
+  TOUCH.ghost.style.left = (t.clientX - TOUCH.grabX) + "px";
+  TOUCH.ghost.style.top = (t.clientY - TOUCH.grabY) + "px";
+  const zone = zoneAtPoint(t.clientX, t.clientY);
+  if (zone !== touchHover) {
+    clearTouchHover();
+    if (zone) { zone.classList.add("drop-hover"); touchHover = zone; }
+  }
+}
+
+function onTouchEnd(e) {
+  if (!TOUCH) return;
+  const cur = TOUCH;
+  TOUCH = null;
+  e.preventDefault();   // 카드 탭 시 합성 클릭/더블클릭 중복 실행 방지
+  if (!cur.moved) {
+    handleCardTap(cur.src);
+    return;
+  }
+  const t = (e.changedTouches && e.changedTouches[0]) || null;
+  const zone = t ? zoneAtPoint(t.clientX, t.clientY) : null;
+  cleanupTouchDrag(cur);
+  if (zone) {
+    DRAG = cur.src;
+    if (zone.classList.contains("found")) handleDropToFound(+zone.dataset.suit);
+    else handleDropToCol(+zone.dataset.col);
+    DRAG = null;
+  }
+}
+
+function onTouchCancel() {
+  if (!TOUCH) return;
+  const cur = TOUCH;
+  TOUCH = null;
+  cleanupTouchDrag(cur);
+}
+
+// 더블탭(같은 카드를 빠르게 두 번) → 파운데이션으로 자동 이동
+function handleCardTap(src) {
+  const key =
+    src.type === "tab" ? `t${src.col}.${src.idx}` :
+    src.type === "waste" ? "w" : `f${src.suit}`;
+  const now = Date.now();
+  const isDouble = key === lastTap.key && (now - lastTap.t) < 320;
+  lastTap = { key, t: now };
+  if (!isDouble) return;
+  lastTap = { key: "", t: 0 };
+  if (src.type === "tab") {
+    if (src.idx === S.game.tab[src.col].length - 1) autoToFoundationFromTab(src.col);
+  } else if (src.type === "waste") {
+    autoToFoundationFromWaste();
+  }
+}
+
+/* ===========================================================
    힌트
 =========================================================== */
 function clearHints() {
@@ -2213,6 +2387,14 @@ function setupStatic() {
     const el = e.target.closest && e.target.closest(".card");
     if (!el || el.dataset.area !== "waste") return;
     autoToFoundationFromWaste();
+  });
+
+  // 모바일/태블릿: 터치 드래그 (위임). touchmove/touchend 는 스크롤 차단 위해 non-passive.
+  [tableau, top].forEach((zone) => {
+    zone.addEventListener("touchstart", onTouchStart, { passive: true });
+    zone.addEventListener("touchmove", onTouchMove, { passive: false });
+    zone.addEventListener("touchend", onTouchEnd, { passive: false });
+    zone.addEventListener("touchcancel", onTouchCancel, { passive: false });
   });
 }
 
