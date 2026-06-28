@@ -23,11 +23,12 @@
 </script>
 <style>
   :root {
-    --card-w: 82px;
-    --card-h: 116px;
-    --gap: 14px;
-    --tab-offset-up: 40px;
-    --tab-offset-down: 16px;
+    /* 화면 폭에 맞춰 카드 크기를 자동 계산 — 7열이 항상 화면 안에 들어오게.
+       (데스크탑에선 82px 로 상한을 둬 너무 커지지 않게 한다) */
+    --gap: clamp(5px, 1.4vw, 14px);
+    --board-pad: clamp(6px, 2vw, 20px);
+    --card-w: min(82px, calc((100vw - 2 * var(--board-pad) - 6 * var(--gap)) / 7));
+    --card-h: calc(var(--card-w) * 1.4146);
     --felt: #1b6b3a;
     --felt-2: #14502c;
   }
@@ -93,17 +94,27 @@
   /* 아랫줄: 기능 버튼 — 자연 폭, 어두운 반투명, 그룹별 글자색 포인트 */
   .toolbar {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;            /* 항상 한 줄 */
     align-items: center;
-    gap: 10px;            /* 그룹과 그룹 사이 간격 */
+    gap: clamp(3px, 1vw, 10px);   /* 그룹 사이 간격 — 좁은 화면일수록 좁아짐 */
   }
-  .btn-group { display: flex; gap: 4px; }   /* 같은 그룹 버튼은 촘촘히 */
+  .btn-group {
+    display: flex;
+    gap: clamp(2px, 0.7vw, 4px);  /* 같은 그룹 버튼은 촘촘히 */
+    flex: 0 1 auto;
+    min-width: 0;
+  }
   .toolbar button {
-    min-width: 0;          /* 글자 크기만큼만 (늘어나지 않음) */
-    min-height: 38px;
-    font-size: 13px;
+    flex: 0 1 auto;               /* 데스크탑: 자연 폭(안 늘어남) / 좁으면 줄어듦 */
+    min-width: 0;
+    min-height: 34px;
+    /* 화면 폭에 따라 글자·여백을 줄여 한 줄에 모두 들어오게 */
+    font-size: clamp(9px, 2.7vw, 13px);
     font-weight: 700;
-    padding: 8px 12px;
+    padding: clamp(4px, 1vw, 8px) clamp(5px, 1.7vw, 12px);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: clip;
     background: rgba(255, 255, 255, 0.08);
     color: #f4f4f4;
     border: 1px solid rgba(255, 255, 255, 0.18);
@@ -111,15 +122,12 @@
   }
   .toolbar button:hover { background: rgba(255, 255, 255, 0.16); filter: none; }
   .toolbar button:disabled { opacity: .4; }
+  .toolbar .prob { flex: 0 0 auto; margin-left: 2px; }
   /* 기능 묶음 구분 — 바탕은 통일, 글자색으로만 포인트 */
   .g-game button { color: #f7d070; }   /* 판 관리: NEW · RESET */
   .g-help button { color: #82c7ff; }   /* 도움: UNDO · HINT */
   .g-save button { color: #5fd6a6; }   /* 저장/불러오기: SAVE · LOAD · SNAP */
   .g-auto button { color: #c79be6; }   /* 자동: AUTO */
-  @media (max-width: 380px) {
-    .toolbar { gap: 8px; }
-    .toolbar button { font-size: 12px; padding: 7px 9px; }
-  }
   /* 클리어 가능/불가능을 작은 원형 점으로 표시 */
   .prob {
     width: 14px;
@@ -168,7 +176,7 @@
   @keyframes pop { from { transform: scale(.85); } to { transform: scale(1); } }
 
   #board {
-    padding: 20px;
+    padding: var(--board-pad);
     max-width: 760px;
     margin: 0 auto;
   }
@@ -194,7 +202,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 30px;
+    font-size: calc(var(--card-w) * 0.37);
     color: rgba(255, 255, 255, 0.28);
   }
   .col { position: relative; }
@@ -207,7 +215,7 @@
     background: #fdfdfd;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
     border: 1px solid #cfcfcf;
-    padding: 6px 8px;
+    padding: calc(var(--card-w) * 0.07) calc(var(--card-w) * 0.1);
     font-weight: 700;
     cursor: grab;
   }
@@ -220,17 +228,17 @@
     flex-direction: column;
     align-items: center;
     line-height: 1;
-    font-size: 16px;
+    font-size: calc(var(--card-w) * 0.2);
     width: fit-content;
   }
-  .card .corner .suit { font-size: 15px; }
+  .card .corner .suit { font-size: calc(var(--card-w) * 0.185); }
   .card .pip {
     position: absolute;
     inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 38px;
+    font-size: calc(var(--card-w) * 0.46);
   }
   .card.down {
     background: repeating-linear-gradient(45deg, #2b5fa8 0 8px, #23507f 8px 16px);
@@ -1794,9 +1802,12 @@ function makeCardEl(c) {
 
 function render() {
   const g = S.game;
-  // (D) 오프셋은 렌더당 한 번만 읽는다 (카드마다 getComputedStyle 호출 방지)
-  const offUp = parseInt(getCSS("--tab-offset-up"));
-  const offDown = parseInt(getCSS("--tab-offset-down"));
+  // 반응형: 실제 렌더된 카드 폭을 한 번 측정해, 세로 겹침 간격을 카드 크기에 비례시킨다.
+  // (#stock 은 항상 존재하고 폭이 --card-w 이므로 기준으로 삼는다)
+  const cardW = $("stock").getBoundingClientRect().width || 82;
+  const cardH = cardW * 1.4146;
+  const offUp = Math.max(12, Math.round(cardH * 0.345));   // 펼친 카드 겹침
+  const offDown = Math.max(5, Math.round(cardH * 0.138));  // 엎어진 카드 겹침
 
   // Stock
   const stock = $("stock");
@@ -1869,7 +1880,7 @@ function render() {
       }
       col.appendChild(el);
     }
-    col.style.minHeight = Math.max(116, y + 116) + "px";
+    col.style.minHeight = Math.max(cardH, y + cardH) + "px";
   }
 }
 
