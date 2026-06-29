@@ -1248,8 +1248,8 @@ function onWin() {
   el.title = "클리어!";
   $("autoBtn").disabled = true;
   startCascade();
-  // 폭포가 화면을 채운 뒤 승리 패널 표시
-  setTimeout(() => $("win").classList.remove("hidden"), 3500);
+  // 승리 패널은 빠르게 띄워 바로 새 게임도 시작할 수 있게 (폭포는 뒤에서 계속 진행)
+  setTimeout(() => $("win").classList.remove("hidden"), 3000);
 }
 
 function drawCascadeCard(ctx, x, y, w, h, s, r) {
@@ -1299,11 +1299,13 @@ function startCascade() {
   let active = [];
   let qi = 0;
   let f = 0;
-  const G = 0.5, REST = 0.78;
+  // G(중력)↓ → 더 천천히 떨어짐 / LAUNCH_EVERY↑ → 카드가 한 장씩 순차적으로 출발
+  const G = 0.32, REST = 0.82;
+  const LAUNCH_EVERY = 180;   // 약 3초 간격(60fps 기준)
 
   function frame() {
-    // 몇 프레임마다 새 카드 한 장 출발
-    if (f % 4 === 0 && qi < queue.length) {
+    // 일정 간격마다 새 카드 한 장씩 출발 (간격이 넓을수록 한 장씩 보임)
+    if (f % LAUNCH_EVERY === 0 && qi < queue.length) {
       const it = queue[qi++];
       const dir = Math.random() < 0.5 ? -1 : 1;
       active.push({
@@ -1311,9 +1313,15 @@ function startCascade() {
         r: it.r,
         x: it.rect.left,
         y: it.rect.top,
-        vx: dir * (3 + Math.random() * 4),
-        vy: -(2 + Math.random() * 5),
+        vx: dir * (2.4 + Math.random() * 3),
+        vy: -(1.5 + Math.random() * 3.5),
       });
+      // 실제 파운데이션에서도 그 카드를 덜어내, 보드의 파운데이션이 한 장씩 줄어들게 한다
+      const fp = S.game.found[it.s];
+      if (fp.length && fp[fp.length - 1].r === it.r) {
+        fp.pop();
+        render();
+      }
     }
     f++;
     for (const c of active) {
