@@ -139,6 +139,15 @@
     background: #2ecc71;
     box-shadow: 0 0 8px 1px rgba(46, 204, 113, 0.85);
   }
+  .prob.checking {
+    background: #9aa0a6;
+    box-shadow: 0 0 6px 1px rgba(154, 160, 166, 0.55);
+    animation: checkPulse 0.9s ease-in-out infinite;
+  }
+  @keyframes checkPulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
   .prob.bad {
     background: #e74c3c;
     animation: badBlink 0.6s steps(1, end) infinite;
@@ -1574,7 +1583,7 @@ function encodeState(g, moves) {
 function decodeState(code) {
   let d;
   try {
-    d = JSON.parse(atob(code.slice(4)));
+    d = JSON.parse(atob(code.slice(4).replace(/\s+/g, "")));
   } catch (e) {
     throw new Error("현재판 코드를 해석할 수 없어요.");
   }
@@ -1740,10 +1749,17 @@ function loadDealFromModal() {
   const ta = $("dealCode");
   const msg = $("dealMsg");
   const raw = (ta.value || "").trim();
+  // 코드 종류 자동 판별 (모바일에서 복사 중 앞 'CUR:' 가 빠지는 경우까지 보정):
+  //  - 공백 제거 후 정확히 52글자 + 딜 문자(A~Z,a~z)만  → 딜(최초 배치)
+  //  - 그 외(길이가 다르거나 base64 등)               → 스냅(현재 상태)으로 간주
+  const compact = raw.replace(/\s+/g, "");
+  const isDealCode = /^[A-Za-z]{52}$/.test(compact);
+  const isCur = !isDealCode;
   try {
-    const isCur = raw.startsWith("CUR:");
     if (isCur) {
-      applyState(decodeState(raw));
+      // 'CUR:' 가 빠져 있으면 붙여서 해석 (decodeState 는 앞 4글자를 떼고 읽음)
+      const code = raw.startsWith("CUR:") ? raw : "CUR:" + compact;
+      applyState(decodeState(code));
     } else {
       applyDeal(decodeDeal(raw));
     }
@@ -1760,7 +1776,8 @@ function loadDealFromModal() {
       }
     });
   } catch (e) {
-    msg.textContent = "불러오기 실패: " + e.message;
+    msg.textContent = "불러오기 실패: " + e.message +
+      " · 스냅 코드는 맨 앞 ‘CUR:’까지, 딜 코드는 52글자를 빠짐없이 붙여넣었는지 확인하세요.";
     msg.className = "modal-msg bad";
   }
 }
@@ -1769,12 +1786,15 @@ function loadDealFromModal() {
 // 무거운 판정은 백그라운드(워커)에서 수행한다. 결과가 도착할 때까지
 // 직전 표시를 그대로 유지해, 사용자에게 '계산 중' 같은 멈춤이 보이지 않게 한다.
 let solveToken = 0;
+let solveDebounce = null;
 function updateSolvability() {
   const el = $("prob");
   if (isWin()) {
     el.className = "prob ok";
     el.title = "클리어!";
     $("autoBtn").disabled = true;
+    clearTimeout(solveDebounce);
+    solveDebounce = null;
     return;
   }
   // 캐시된 플랜이 살아 있으면 이미 "가능"이 확정 → 계산 불필요(즉시 반영)
@@ -1782,9 +1802,26 @@ function updateSolvability() {
     el.className = "prob ok";
     el.title = "클리어 가능";
     $("autoBtn").disabled = S.autoPlaying;
+    clearTimeout(solveDebounce);
+    solveDebounce = null;
     return;
   }
-  // 그 외에는 백그라운드에서 판정 + 플랜 캐시 (다음 힌트/AUTO 가 즉시 되도록)
+  // 재계산이 필요한 상태 → 직전 표시(초록)를 유지하지 않고 '확인 중(회색)'으로.
+  // 그리고 잠깐 멈춘 뒤 "가장 최신 상태"로 한 번만 계산한다(디바운스).
+  // → 빠르게 연속으로 둘 때 옛 결과로 잘못 표시되는 문제를 막는다.
+  el.className = "prob checking";
+  el.title = "클리어 가능 여부 확인 중…";
+  $("autoBtn").disabled = true;   // 결과가 나오기 전엔 잠시 비활성화
+  clearTimeout(solveDebounce);
+  solveDebounce = setTimeout(runSolvabilityCheck, 280);
+}
+
+// 디바운스 후 실제 판정 — 멈춘 시점의 최신 상태를 백그라운드(워커)에서 계산
+function runSolvabilityCheck() {
+  solveDebounce = null;
+  // 그 사이 승리했거나 플랜이 생겼으면 표시를 다시 정리
+  if (isWin() || (S.plan && S.plan.length)) { updateSolvability(); return; }
+  const el = $("prob");
   const abs = toAbs(S.game);
   const key = serialize(abs);
   const token = ++solveToken;
