@@ -54,22 +54,6 @@
     position: relative;
     z-index: 200;
   }
-  /* 윗줄: 제목 + 우측 신호등 점 */
-  .titlebar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  header h1 {
-    font-size: clamp(15px, 4.4vw, 18px);
-    margin: 0;
-    letter-spacing: .5px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 1 1 auto;
-    min-width: 0;
-  }
   button {
     font: inherit;
     font-size: 14px;
@@ -96,6 +80,7 @@
     display: flex;
     flex-wrap: nowrap;            /* 항상 한 줄 */
     align-items: center;
+    justify-content: center;      /* 남는 공간이 있으면 버튼 묶음을 가운데로 */
     gap: clamp(3px, 1vw, 10px);   /* 그룹 사이 간격 — 좁은 화면일수록 좁아짐 */
   }
   .btn-group {
@@ -455,9 +440,6 @@
 </head>
 <body>
   <header>
-    <div class="titlebar">
-      <h1>♠ 무조건 클리어 클론다이크 ♥</h1>
-    </div>
     <div class="toolbar">
       <div class="btn-group g-game">
         <button id="newBtn">NEW</button>
@@ -1521,6 +1503,18 @@ function encodeDeal(g) {
   return s;
 }
 
+// 딜 코드(52글자)는 "갓 돌린 새 판"(타블로 1~7열 28장 + 스톡 24장, 웨이스트·파운데이션
+// 비어 있음)일 때만 카드 손실 없이 왕복된다. SNAP 을 LOAD 하면 시작 상태가 중간 판이
+// 되므로 이 조건이 깨진다 → 그럴 땐 딜 코드 대신 전체 상태 코드로 저장해야 한다.
+function isFreshDeal(g) {
+  if (!g) return false;
+  if (g.waste.length) return false;
+  if (g.found.some((p) => p.length)) return false;
+  if (g.stock.length !== 24) return false;
+  for (let c = 0; c < 7; c++) if (g.tab[c].length !== c + 1) return false;
+  return true;
+}
+
 // 코드 문자열 -> 최초 배치 게임 상태. 잘못된 코드면 Error 던짐.
 function decodeDeal(code) {
   const clean = (code || "").replace(/\s+/g, "");
@@ -1591,7 +1585,9 @@ function encodeState(g, moves) {
 function decodeState(code) {
   let d;
   try {
-    d = JSON.parse(atob(code.slice(4).replace(/\s+/g, "")));
+    // 'CUR:' 접두사는 대소문자 구분 없이(cur:, Cur: 등) 떼어내고, 없어도 허용한다.
+    const b64 = String(code).replace(/^\s*cur:/i, "").replace(/\s+/g, "");
+    d = JSON.parse(atob(b64));
   } catch (e) {
     throw new Error("현재판 코드를 해석할 수 없어요.");
   }
@@ -1704,9 +1700,17 @@ function openDealModal(mode) {
     let code;
     if (mode === "save") {
       if (!S.initialState) return;
-      code = encodeDeal(S.initialState);
-      desc.textContent =
-        "이 판(최초 배치)의 코드예요. 복사해 두면 나중에 ‘LOAD’로 똑같은 판을 다시 플레이할 수 있어요.";
+      if (isFreshDeal(S.initialState)) {
+        code = encodeDeal(S.initialState);
+        desc.textContent =
+          "이 판(최초 배치)의 코드예요. 복사해 두면 나중에 ‘LOAD’로 똑같은 판을 다시 플레이할 수 있어요.";
+      } else {
+        // SNAP 에서 시작한 판은 '최초 배치 딜'이 없다 → 카드 손실 없이
+        // 시작 상태 전체를 담는 코드(SNAP 과 동일 형식)로 저장한다.
+        code = encodeState(S.initialState, 0);
+        desc.textContent =
+          "이 판은 스냅 지점에서 시작했어요. (52글자 딜 코드가 없어) 시작 상태 전체 코드로 저장합니다. ‘LOAD’에 붙여넣으면 이 시작 상태가 그대로 재현돼요.";
+      }
     } else {
       if (!S.game) return;
       code = encodeState(S.game, S.moves);
@@ -1761,13 +1765,16 @@ function loadDealFromModal() {
   //  - 공백 제거 후 정확히 52글자 + 딜 문자(A~Z,a~z)만  → 딜(최초 배치)
   //  - 그 외(길이가 다르거나 base64 등)               → 스냅(현재 상태)으로 간주
   const compact = raw.replace(/\s+/g, "");
-  const isDealCode = /^[A-Za-z]{52}$/.test(compact);
+  // 영문자로만 이뤄진 입력은 딜 코드로 본다(길이가 52가 아니어도).
+  //  - 스냅(CUR) 코드는 base64라 숫자/기호가 섞이므로 절대 영문자뿐일 수 없다.
+  //  - 덕분에 잘린 딜 코드도 decodeDeal 이 '52글자여야 해요 (현재 N글자)'로
+  //    정확히 안내한다.
+  const isDealCode = /^[A-Za-z]+$/.test(compact);
   const isCur = !isDealCode;
   try {
     if (isCur) {
-      // 'CUR:' 가 빠져 있으면 붙여서 해석 (decodeState 는 앞 4글자를 떼고 읽음)
-      const code = raw.startsWith("CUR:") ? raw : "CUR:" + compact;
-      applyState(decodeState(code));
+      // 'CUR:' 접두사 유무·대소문자는 decodeState 가 알아서 처리한다.
+      applyState(decodeState(raw));
     } else {
       applyDeal(decodeDeal(raw));
     }
