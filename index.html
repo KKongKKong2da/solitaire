@@ -376,6 +376,8 @@
   .tut-step { font-size: 12px; color: #9fd9b6; margin-bottom: 4px; min-height: 14px; }
   .tut-title { font-size: 18px; font-weight: 800; margin-bottom: 8px; }
   .tut-why { font-size: 14px; line-height: 1.5; color: #e8e8e8; margin-bottom: 10px; }
+  .tut-why .gain { color: #6fe3b0; font-weight: 700; }  /* 이득: 초록 */
+  .tut-why .loss { color: #ff9a9a; font-weight: 700; }  /* 손해: 빨강 */
   .tut-principle {
     font-size: 13px;
     color: #cfe9ff;
@@ -912,6 +914,17 @@ function canFound(c) {
   const top = f.length ? f[f.length - 1].r : 0;
   return c.r === top + 1;
 }
+// 보이는 정보(파운데이션 윗면)만으로 "올려도 절대 막히지 않음"을 증명한다.
+// 뒤집힌 카드는 보지 않으므로 힌트 해설에 써도 정보 누설이 없다.
+//  - A·2 는 무조건 안전.
+//  - r≥3 은 '반대색 (r-1)' 두 장이 모두 파운데이션에 올라가 있으면,
+//    이 카드를 타블로에서 받을 카드가 더는 없으므로 안전.
+function isProvablySafe(card) {
+  if (card.r <= 2) return true;
+  const need = card.r - 1;
+  const opp = isRed(card.s) ? [0, 3] : [1, 2];
+  return opp.every((s) => S.game.found[s].length >= need);
+}
 function isWin() {
   return S.game.found.every((f) => f.length === 13);
 }
@@ -1345,7 +1358,7 @@ function showHintPanel(on) {
 function hintSay(stepText, title, why, principle) {
   $("tutStep").textContent = stepText || "";
   $("tutTitle").textContent = title || "";
-  $("tutWhy").textContent = why || "";
+  $("tutWhy").innerHTML = why || ""; // 본문은 일부 단어 색칠을 위해 HTML 허용(전부 내부 생성 문자열이라 안전)
   $("tutPrinciple").textContent = principle || "";
 }
 function closeHintPanel() {
@@ -1372,10 +1385,12 @@ function explainMove(m, isDraw) {
     };
   }
   if (m.k === "F") {
-    const card =
-      m.src === "t"
-        ? S.game.tab[m.col][S.game.tab[m.col].length - 1]
-        : m.card;
+    const fromTab = m.src === "t";
+    const pile = fromTab ? S.game.tab[m.col] : null;
+    const card = fromTab ? pile[pile.length - 1] : m.card;
+    const need = RANK_SYM[card.r - 1];
+    const oppColor = isRed(card.s) ? "검은색" : "빨간색";
+
     if (card.r <= 2) {
       return {
         title: `${cardLabel(card)} → 파운데이션`,
@@ -1383,17 +1398,51 @@ function explainMove(m, isDraw) {
         principle: "A·2는 무조건 바로 올린다.",
       };
     }
+    // '안전'은 보이는 정보로 증명될 때만 단언한다(숨은 카드 정보 누설 방지).
+    if (isProvablySafe(card)) {
+      return {
+        title: `${cardLabel(card)} → 파운데이션`,
+        why: `이 카드를 타블로에서 받을 수 있는 건 ${oppColor} ${need} 인데, 그 두 장이 이미 파운데이션에 올라가 있어요. 더는 받칠 카드가 없으니 안전하게 올립니다.`,
+        principle: "파운데이션은 ‘안전이 증명될 때만’ 올린다.",
+      };
+    }
+    // 증명 불가: 추천 근거는 숨은 카드라 말할 수 없다. 대신 '보이는 이득/손해'를
+    // 구체적으로 설명한다. (가장 큰 이득은 숨은 카드 공개 / 빈 칸 만들기)
+    const revealsHidden = fromTab && pile.length >= 2 && !pile[pile.length - 2].up;
+    const emptiesCol = fromTab && pile.length === 1;
+    if (revealsHidden) {
+      return {
+        title: `${cardLabel(card)} → 파운데이션`,
+        why: `올리면 ${m.col + 1}번째 줄에 엎어져 있던 카드가 바로 드러나요. 숨은 카드를 까는 게 가장 큰 진전이라, 이 올리기는 <span class="gain">이득</span>이 분명합니다.`,
+        principle: "숨은 카드를 여는 올리기는 망설이지 않는다.",
+      };
+    }
+    if (emptiesCol) {
+      return {
+        title: `${cardLabel(card)} → 파운데이션`,
+        why: `올리면 ${m.col + 1}번째 줄이 비어, King을 새로 세울 빈 칸이 생겨요. 빈 칸은 강력한 자원이라 <span class="gain">이득</span>입니다.`,
+        principle: "빈 칸(King 자리)을 만드는 올리기.",
+      };
+    }
+    // 공개·빈칸 같은 눈에 보이는 이득이 없는 경우: 이득과 손해를 솔직히 짚어준다.
     return {
       title: `${cardLabel(card)} → 파운데이션`,
-      why: `이 카드는 이제 타블로에서 다리 역할을 할 필요가 없어, 안전하게 파운데이션으로 올립니다.`,
-      principle: "파운데이션은 ‘안전할 때만’ 천천히 올린다.",
+      why: `<span class="gain">이득</span>: 파운데이션이 한 칸 진행돼요. <span class="loss">손해</span>: 이 카드로 ${oppColor} ${need}를 받는 ‘다리’는 못 쓰게 돼요.`,
+      principle: "올리기의 이득(진행)과 손해(다리 상실)를 저울질한다.",
     };
   }
   // m.k === "T" (타블로로 이동)
+  // 다리(bridge): 옮긴 카드(rank r) 위에는 규칙상 '반대색 (r-1)' 만 올라올 수 있다.
+  // 이는 옮기는 카드만 보면 알 수 있어(숨은 카드와 무관) 해설에 적어도 누설이 아니다.
+  const receiverText = (card) =>
+    card.r >= 2 ? `${isRed(card.s) ? "검은색" : "빨간색"} ${RANK_SYM[card.r - 1]}` : null;
   if (m.src === "t") {
-    const movingCard = S.game.tab[m.col][m.idx];
-    const revealsHidden = m.idx > 0 && !S.game.tab[m.col][m.idx - 1].up;
+    const srcPile = S.game.tab[m.col];
+    const movingCard = srcPile[m.idx];            // 묶음의 맨 아래(목적지에 닿는 카드)
+    const runTop = srcPile[srcPile.length - 1];    // 묶음의 맨 위(다음 카드를 받는 카드)
+    const revealsHidden = m.idx > 0 && !srcPile[m.idx - 1].up;
     const toEmpty = S.game.tab[m.to].length === 0;
+    const recv = receiverText(runTop);             // 받을 카드는 '묶음 맨 위' 기준
     if (revealsHidden) {
       return {
         title: `${cardLabel(movingCard)} → ${tabDestLabel(m.to)}`,
@@ -1404,23 +1453,38 @@ function explainMove(m, isDraw) {
     if (toEmpty && movingCard.r === 13) {
       return {
         title: `${cardLabel(movingCard)} → 빈 칸`,
-        why: `빈 칸에는 King만 놓을 수 있어요. 여기에 King을 세워 새 줄을 시작하고, 앞으로 카드를 받을 자리를 만듭니다.`,
+        why: `빈 칸엔 King만 놓을 수 있어요. King으로 새 줄을 시작하고, 그 위엔 ${recv} 를 받을 수 있어요.`,
         principle: "빈 칸은 King 전용 자원.",
+      };
+    }
+    if (recv) {
+      return {
+        title: `${cardLabel(movingCard)} → ${tabDestLabel(m.to)}`,
+        why: `이 카드를 옮기면 그 위에 ${recv} 를 받을 수 있어요. 다음 카드가 안착할 다리를 미리 만드는 수예요.`,
+        principle: `다리 만들기 — 이 위엔 ${recv} 가 올라온다.`,
       };
     }
     return {
       title: `${cardLabel(movingCard)} → ${tabDestLabel(m.to)}`,
-      why: `카드를 알맞은 자리로 옮겨, 다음에 필요한 카드를 받거나 순서를 정리합니다.`,
+      why: `카드를 알맞은 자리로 옮겨 순서를 정리합니다.`,
       principle: "다리를 만들어 다음 수를 준비한다.",
     };
   }
   // m.src === "sw" (웨이스트 맨 위 카드를 타블로로)
   const toEmpty = S.game.tab[m.to].length === 0;
+  const recvW = receiverText(m.card);
   if (toEmpty && m.card.r === 13) {
     return {
       title: `${cardLabel(m.card)} → 빈 칸`,
-      why: `웨이스트에 나온 King을 빈 칸에 세워 새 줄을 시작합니다.`,
+      why: `웨이스트에 나온 King을 빈 칸에 세워요. 그 위로 ${receiverText(m.card)} 부터 새 줄을 쌓을 수 있어요.`,
       principle: "빈 칸은 King 전용 자원.",
+    };
+  }
+  if (recvW) {
+    return {
+      title: `${cardLabel(m.card)} → ${tabDestLabel(m.to)}`,
+      why: `웨이스트의 이 카드를 타블로에 놓으면 그 위에 ${recvW} 를 받을 수 있어요.`,
+      principle: `다리 만들기 — 이 위엔 ${recvW} 가 올라온다.`,
     };
   }
   return {
