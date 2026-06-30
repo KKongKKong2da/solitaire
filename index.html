@@ -55,6 +55,15 @@
     z-index: 200;
   }
   button {
+    /* iOS Safari는 버튼에 네이티브 렌더링을 적용해 글자가 한쪽으로 쏠린다.
+       appearance:none 으로 네이티브 스타일을 끄고, flex 로 내용물을 강제 가운데 정렬한다. */
+    -webkit-appearance: none;
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    line-height: 1;
     font: inherit;
     font-size: 14px;
     padding: 8px 16px;
@@ -1279,11 +1288,13 @@ function startCascade() {
   const ctx = cv.getContext("2d");
   ctx.clearRect(0, 0, cv.width, cv.height);
 
-  const cardW = 70, cardH = 98;
   const rects = [0, 1, 2, 3].map((s) => {
     const e = $("found-" + s);
-    return e ? e.getBoundingClientRect() : { left: 80 + s * 90, top: 60 };
+    return e ? e.getBoundingClientRect() : { left: 80 + s * 90, top: 60, width: 70, height: 98 };
   });
+  // 폭포 카드 크기는 '실제 파운데이션 칸 크기'에 맞춘다(고정값이면 모바일에서 너무 커 보임).
+  const cardW = Math.round(rects[0].width) || 70;
+  const cardH = Math.round(rects[0].height) || 98;
 
   // 파운데이션 위에서부터(K→A) 한 장씩 떨어뜨릴 큐
   const queue = [];
