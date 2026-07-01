@@ -634,23 +634,39 @@ function removeSW(arr, card) {
   if (i >= 0) arr.splice(i, 1);
 }
 
+// 어떤 카드를 파운데이션에 "안전하게" 올릴 수 있는가:
+//  - A·2 는 항상 안전.
+//  - r≥3 은 반대색 두 파운데이션이 모두 (r-1) 이상이면 안전
+//    (그 카드를 타블로에서 받을(=r-1 반대색을 올릴) 일이 더는 없으므로).
+//  안전한 카드만 강제로 올리므로 승리 가능성은 절대 손상되지 않는다.
+function safeToFound(F, suit, r) {
+  if (r <= 2) return true;
+  return isRed(suit)
+    ? F[0] >= r - 1 && F[3] >= r - 1   // 빨강 → 검정(♠0,♣3) 두 곳
+    : F[1] >= r - 1 && F[2] >= r - 1;  // 검정 → 빨강(♥1,♦2) 두 곳
+}
+
 function genMoves(s, allowDown) {
-  // 강제 수: A, 2 는 항상 파운데이션으로 올리는 게 안전 → 분기 제거
+  // [#1 안전 자동올리기] 안전하게 올릴 수 있는 카드는 무조건 올린다 → 분기 제거(대량 가지치기)
   for (let c = 0; c < 7; c++) {
     const p = s.T[c];
     if (p.length) {
       const card = p[p.length - 1];
-      if (card.up && card.r <= 2 && s.F[card.s] === card.r - 1)
+      if (card.up && s.F[card.s] === card.r - 1 && safeToFound(s.F, card.s, card.r))
         return [{ k: "F", src: "t", col: c }];
     }
   }
   for (const card of s.SW) {
-    if (card.r <= 2 && s.F[card.s] === card.r - 1)
+    if (s.F[card.s] === card.r - 1 && safeToFound(s.F, card.s, card.r))
       return [{ k: "F", src: "sw", card }];
   }
 
+  // [#2 빈 칸 대칭 제거] 빈 열들은 서로 구별이 무의미 → 대표 하나(firstEmpty)만 목적지로.
+  let firstEmpty = -1;
+  for (let d = 0; d < 7; d++) if (s.T[d].length === 0) { firstEmpty = d; break; }
+
   const moves = [];
-  // 1) 파운데이션 올리기
+  // 1) 파운데이션 올리기 (안전하지 않은 것도 '선택 수'로는 허용)
   for (let c = 0; c < 7; c++) {
     const p = s.T[c];
     if (p.length) {
@@ -676,6 +692,7 @@ function genMoves(s, allowDown) {
         if (d === c) continue;
         const dp = s.T[d];
         if (dp.length === 0) {
+          if (d !== firstEmpty) continue;                    // #2 빈 칸 대칭
           // 빈 칸엔 K 만, 그리고 빈칸->빈칸 통째 이동은 무의미
           if (run0.r === 13 && start > 0)
             moves.push({ k: "T", src: "t", col: c, idx: start, to: d });
@@ -688,20 +705,32 @@ function genMoves(s, allowDown) {
   // 3) 사용 가능 카드(SW) -> 타블로
   for (const card of s.SW) {
     for (let d = 0; d < 7; d++) {
-      if (canPlaceOnPile(card, s.T[d]))
+      const dp = s.T[d];
+      if (dp.length === 0) {
+        if (d !== firstEmpty) continue;                      // #2 빈 칸 대칭
+        if (card.r === 13) moves.push({ k: "T", src: "sw", card, to: d });
+      } else if (canPlaceOnPile(card, dp)) {
         moves.push({ k: "T", src: "sw", card, to: d });
+      }
     }
   }
   // 4) (2차 탐색 전용) 파운데이션 -> 타블로 되내리기
-  //    A·2 는 되내려도 곧장 다시 올라갈 뿐이라 진동만 유발 → r>=3 만 허용
+  //    [#3 진동 방지] '안전한' 카드는 되내려도 곧장 다시 올라갈 뿐이라 무의미 → 제외.
+  //    (r<3 도 제외 — A·2 는 항상 안전이라 위 조건에 포함됨)
   if (allowDown) {
     for (let suit = 0; suit < 4; suit++) {
       const r = s.F[suit];
       if (r < 3) continue;
+      if (safeToFound(s.F, suit, r)) continue;               // #3 진동 방지
       const card = { s: suit, r };
       for (let d = 0; d < 7; d++) {
-        if (canPlaceOnPile(card, s.T[d]))
+        const dp = s.T[d];
+        if (dp.length === 0) {
+          if (d !== firstEmpty) continue;                    // #2 빈 칸 대칭
+          if (card.r === 13) moves.push({ k: "D", suit, to: d });
+        } else if (canPlaceOnPile(card, dp)) {
           moves.push({ k: "D", suit, to: d });
+        }
       }
     }
   }
@@ -745,6 +774,7 @@ function isWinAbs(s) {
   return s.F[0] === 13 && s.F[1] === 13 && s.F[2] === 13 && s.F[3] === 13;
 }
 
+// (메인 스레드 플랜 추적용) 정확한 상태 문자열. 열 순서·SW 순서 무시(정렬).
 function serialize(s) {
   const piles = s.T
     .map((p) => p.map((c) => (c.up ? "+" : "-") + c.s + "." + c.r).join(","))
@@ -754,28 +784,65 @@ function serialize(s) {
   return s.F.join(",") + ";" + piles + ";" + sw;
 }
 
-// 탐색 예산
-const FWD_CAP = 700000;   // 1차: 앞으로만 두는 탐색 상한 (상향 → 깔끔한 정답 우선)
+// [#5] 탐색 중복 제거용 상태 해시 — serialize 보다 훨씬 빠르고 메모리도 작다.
+//  - 열 순서/SW 순서는 무시(덧셈으로 합쳐 순서 무관 + 다중도 보존), 열 내부 순서·앞뒤면은 반영.
+//  - 32비트 두 레인(≈64비트)이라 실사용 규모에서 충돌은 사실상 0.
+function hashState(s) {
+  let A0 = 0, A1 = 0; // 열들: 덧셈으로 합산(순서 무관 + 같은 내용 열도 안 지워짐)
+  for (let c = 0; c < 7; c++) {
+    const p = s.T[c];
+    let a = 2166136261, b = 2246822519;
+    a = Math.imul(a ^ (p.length + 1), 16777619) >>> 0;
+    b = Math.imul(b ^ (p.length + 13), 3266489917) >>> 0;
+    for (let i = 0; i < p.length; i++) {
+      const code = (p[i].s * 13 + (p[i].r - 1)) * 2 + (p[i].up ? 1 : 0) + 1;
+      a = Math.imul(a ^ code, 16777619) >>> 0;
+      b = Math.imul(b ^ (code + 131), 3266489917) >>> 0;
+    }
+    A0 = (A0 + a) >>> 0;
+    A1 = (A1 + b) >>> 0;
+  }
+  let S0 = 0, S1 = 0; // SW: 카드 유일 → 덧셈으로 순서 무관
+  for (let i = 0; i < s.SW.length; i++) {
+    const id = s.SW[i].s * 13 + (s.SW[i].r - 1) + 1;
+    S0 = (S0 + (Math.imul(id, 2654435761) >>> 0)) >>> 0;
+    S1 = (S1 + (Math.imul(id, 40503) >>> 0)) >>> 0;
+  }
+  let F0 = 2166136261, F1 = 2246822519; // 파운데이션(무늬 순서 고정)
+  for (let k = 0; k < 4; k++) {
+    F0 = Math.imul(F0 ^ (s.F[k] + 1), 16777619) >>> 0;
+    F1 = Math.imul(F1 ^ (s.F[k] * 17 + 1), 3266489917) >>> 0;
+  }
+  const X = (A0 ^ S0 ^ F0) >>> 0;
+  const Y = (A1 ^ S1 ^ F1) >>> 0;
+  return X.toString(36) + ":" + Y.toString(36);
+}
+
+// 탐색 예산 — 시간(벽시계) 컷오프는 없앴다(정직함: '끝까지' 보게).
+// 폭주(무한·메모리)만 막는 '노드 수 상한'을 안전 브레이크로 남긴다.
+const FWD_CAP = 700000;   // 1차: 앞으로만 두는 탐색 상한
 const F2T_CAP = 1500000;  // 2차: 되내리기(f2t) 포함 탐색 상한
 
-// 풀이를 찾으면 첫 수부터의 move 배열을 반환, 못 찾으면 null
+// { plan, complete } 반환.
+//  - plan     : 승리 수순(배열) 또는 null
+//  - complete : 노드/깊이 상한에 한 번도 안 걸리고 상태공간을 "끝까지" 봤는지.
+//               complete && !plan  →  '진짜 불가능'이 증명됨.
+//               complete === false →  상한에 걸려 중단(=아직 모름).
 // allowDown=true 면 파운데이션→타블로 되내리기(D수)까지 탐색에 포함한다.
-function solve(abs, cap, allowDown) {
+// exact=true    면 방문 기록 키로 (충돌 없는) 정확한 serialize 를 쓴다.
+//   → '불가능 확정(빨강)'을 만들어내는 완전탐색에서만 켜서, 해시 충돌로 인한
+//      '거짓 빨강' 가능성을 원천 차단한다. (초록 찾기용 빠른 탐색은 해시로 충분)
+function solve(abs, cap, allowDown, exact) {
   const visited = new Set();
   const CAP = cap || 200000;
   const MAX_DEPTH = 400;
-  // 시간 예산: 어떤 판이든 이 시간을 넘기면 탐색을 멈춘다.
-  // (노드 수 상한과 함께 최악의 경우 CPU·메모리 사용을 안전하게 제한)
-  const BUDGET_MS = 2500;
-  const nowMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
-  const start = nowMs();
   let nodes = 0;
+  let hitLimit = false; // 노드/깊이 상한에 걸려 가지치기한 적이 있는가
   const path = [];
   function dfs(s, depth) {
     if (isWinAbs(s)) return true;
-    if (nodes++ > CAP || depth > MAX_DEPTH) return false;
-    if ((nodes & 2047) === 0 && nowMs() - start > BUDGET_MS) return false;
-    const key = serialize(s);
+    if (nodes++ > CAP || depth > MAX_DEPTH) { hitLimit = true; return false; }
+    const key = exact ? serialize(s) : hashState(s);
     if (visited.has(key)) return false;
     visited.add(key);
     const moves = genMoves(s, allowDown);
@@ -786,12 +853,20 @@ function solve(abs, cap, allowDown) {
     }
     return false;
   }
-  return dfs(abs, 0) ? path.slice() : null;
+  const found = dfs(abs, 0);
+  return { plan: found ? path.slice() : null, complete: !hitLimit };
 }
 
-// 2단 탐색: 먼저 앞으로만(빠름), 실패하면 되내리기까지 포함해 다시 시도.
+// 2단 탐색: 앞으로만(빠름) → 실패 시 되내리기까지 포함.
+// 반환 { plan, unsolvable }
+//  - unsolvable : 되내리기 포함(=완전 이동집합) 탐색을 "끝까지" 봤는데도 해답이
+//                 없을 때만 true(확정 불가능). 상한에 걸려 못 본 경우는 false(=모름).
 function solvePlan(abs) {
-  return solve(abs, FWD_CAP, false) || solve(abs, F2T_CAP, true);
+  const r1 = solve(abs, FWD_CAP, false, false);   // 1차: 빠른 해시(초록 찾기)
+  if (r1.plan) return { plan: r1.plan, unsolvable: false };
+  const r2 = solve(abs, F2T_CAP, true, true);      // 2차: 정확 키(빨강=불가능 확정)
+  if (r2.plan) return { plan: r2.plan, unsolvable: false };
+  return { plan: null, unsolvable: r2.complete };
 }
 
 /* ===========================================================
@@ -800,7 +875,7 @@ function solvePlan(abs) {
 function dealWinnable() {
   for (let tries = 0; tries < 2000; tries++) {
     const g = layout(shuffle(freshDeck()));
-    if (solve(toAbs(g), 80000)) return g;
+    if (solve(toAbs(g), 80000).plan) return g;
   }
   // 극히 드문 경우의 안전장치
   return layout(shuffle(freshDeck()));
@@ -825,10 +900,12 @@ function buildSolverWorkerSource() {
     canPlaceOnPile.toString(),
     flipTop.toString(),
     removeSW.toString(),
+    safeToFound.toString(),
     genMoves.toString(),
     applyAbs.toString(),
     isWinAbs.toString(),
     serialize.toString(),
+    hashState.toString(),
     solve.toString(),
     solvePlan.toString(),
     freshDeck.toString(),
@@ -843,42 +920,55 @@ function buildSolverWorkerSource() {
   ].join("\n");
 }
 
-const SOLVER = {
-  worker: null,
-  nextId: 1,
-  pending: new Map(),
-  init() {
-    try {
-      const src = buildSolverWorkerSource();
-      const url = URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
-      this.worker = new Worker(url);
-      this.worker.onmessage = (e) => {
-        const { id, result } = e.data || {};
-        const resolve = this.pending.get(id);
-        if (resolve) { this.pending.delete(id); resolve(result); }
-      };
-      this.worker.onerror = () => { this.worker = null; };
-    } catch (e) {
-      this.worker = null; // 폴백: 동기 계산
-    }
-  },
-  _req(msg) {
-    return new Promise((resolve) => {
-      if (!this.worker) {
-        // 동기 폴백 (멈춤이 생길 수 있지만 결과는 동일)
-        if (msg.type === "deal") resolve(dealWinnable());
-        else if (msg.type === "solve") resolve(solvePlan(msg.abs));
-        else resolve(null);
-        return;
+// 백그라운드 계산을 대신하는 '워커 클라이언트' 하나를 만든다.
+// 워커 소스는 딜 생성('deal')·판정('solve')을 모두 처리하므로, 같은 소스로
+// 여러 명을 찍어내 역할만 나눠 쓸 수 있다. (아래 SOLVER/DEALER 분업)
+function makeWorkerClient() {
+  return {
+    worker: null,
+    nextId: 1,
+    pending: new Map(),
+    init() {
+      try {
+        const src = buildSolverWorkerSource();
+        const url = URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
+        this.worker = new Worker(url);
+        this.worker.onmessage = (e) => {
+          const { id, result } = e.data || {};
+          const resolve = this.pending.get(id);
+          if (resolve) { this.pending.delete(id); resolve(result); }
+        };
+        this.worker.onerror = () => { this.worker = null; };
+      } catch (e) {
+        this.worker = null; // 폴백: 동기 계산
       }
-      const id = this.nextId++;
-      this.pending.set(id, resolve);
-      this.worker.postMessage(Object.assign({ id }, msg));
-    });
-  },
-  solveAsync(abs) { return this._req({ type: "solve", abs }); },
-  dealAsync() { return this._req({ type: "deal" }); },
-};
+    },
+    _req(msg) {
+      return new Promise((resolve) => {
+        if (!this.worker) {
+          // 동기 폴백 (멈춤이 생길 수 있지만 결과는 동일)
+          if (msg.type === "deal") resolve(dealWinnable());
+          else if (msg.type === "solve") resolve(solvePlan(msg.abs));
+          else resolve(null);
+          return;
+        }
+        const id = this.nextId++;
+        this.pending.set(id, resolve);
+        this.worker.postMessage(Object.assign({ id }, msg));
+      });
+    },
+    solveAsync(abs) { return this._req({ type: "solve", abs }); },
+    dealAsync() { return this._req({ type: "deal" }); },
+  };
+}
+
+// 조수 2명 분업:
+//  - SOLVER : '이 판 풀려?' 판정 전담 (매 수마다 호출됨)
+//  - DEALER : '다음에 쓸 풀리는 새 판' 생성 전담 (백그라운드 큐 채우기)
+// 한 명이 몇 초짜리 어려운 판정을 붙잡고 있어도, 다른 한 명은 새 판을 계속
+// 만들 수 있다. (한 명이 두 일을 다 하면 서로 발목을 잡던 문제를 해소)
+const SOLVER = makeWorkerClient();
+const DEALER = makeWorkerClient();
 
 /* 새 판을 미리 만들어 두는 큐 — 'NEW' 를 눌렀을 때 즉시 시작되도록 */
 const dealQueue = [];
@@ -887,7 +977,7 @@ const DEAL_TARGET = 2;
 function ensureDealQueue() {
   while (dealQueue.length + dealsInFlight < DEAL_TARGET) {
     dealsInFlight++;
-    SOLVER.dealAsync().then((g) => {
+    DEALER.dealAsync().then((g) => {
       dealsInFlight--;
       if (g) dealQueue.push(g);
     });
@@ -900,9 +990,10 @@ function ensurePlan() {
   if (S.plan && S.plan.length) return Promise.resolve(S.plan);
   const abs = toAbs(S.game);
   const key = serialize(abs);
-  return SOLVER.solveAsync(abs).then((plan) => {
+  return SOLVER.solveAsync(abs).then((res) => {
+    const plan = res && res.plan;
     if (serialize(toAbs(S.game)) === key) {
-      S.plan = plan;
+      S.plan = plan || null;
       S.planAbs = abs;
     }
     return S.plan && S.plan.length ? S.plan : null;
@@ -1527,7 +1618,12 @@ function updateUndoBtn() {
   // 자동 진행 중에는 되돌리기/처음으로를 강제로 잠근다.
   const lock = S.autoPlaying;
   $("undoBtn").disabled = lock || S.history.length === 0;
-  $("restartBtn").disabled = lock || S.history.length === 0;
+  // RESET: 수를 뒀거나(히스토리 있음), 스냅 지점에서 시작해 현재가 최초 배치와
+  // 다르면 활성화 → LOAD 직후에도 진짜 첫 배치로 돌아갈 수 있다.
+  const canRestart =
+    !!S.initialState &&
+    (S.history.length > 0 || !gameEquals(S.game, S.initialState));
+  $("restartBtn").disabled = lock || !canRestart;
 }
 
 // 자동 진행 동안 헤더 버튼 일괄 잠금/해제 (시각적 비활성화 + 안전장치)
@@ -1538,9 +1634,17 @@ function lockButtons(on) {
   });
 }
 
+// 두 게임 상태가 완전히 같은지 (스톡 순서·공개 여부·파운데이션까지) 비교.
+function gameEquals(a, b) {
+  if (!a || !b) return false;
+  return encodeState(a, 0) === encodeState(b, 0);
+}
+
 // 이 판의 최초 배치로 되돌리기 (되돌리기를 끝까지 한 것과 동일)
+// - 되돌릴 게 있으면(수를 뒀거나, 스냅 지점에서 시작해 최초 배치와 다르면) 가능.
 function restart() {
-  if (!S.initialState || S.history.length === 0) return;
+  if (!S.initialState) return;
+  if (S.history.length === 0 && gameEquals(S.game, S.initialState)) return;
   S.autoPlaying = false;
   S.hinting = false;
   showHintPanel(false);
@@ -1646,26 +1750,27 @@ function applyDeal(deal) {
    파운데이션·웨이스트까지 "지금 이 순간"을 그대로 담는다.
    형식: "CUR:" + base64(JSON) — 딜 코드와 자동 구분된다.
 =========================================================== */
-function encodeState(g, moves) {
-  const data = {
+// 하나의 게임 상태 -> {t,s,w,f} 평면 객체. (encode/decode 내부 공용)
+function encodeGameObj(g) {
+  return {
     t: g.tab.map((p) => p.map((c) => [c.s, c.r, c.up ? 1 : 0])),
     s: g.stock.map((c) => [c.s, c.r]),
     w: g.waste.map((c) => [c.s, c.r]),
     f: g.found.map((p) => p.map((c) => [c.s, c.r])),
-    m: moves,
   };
+}
+
+// initG 를 넘기면 "이 판의 최초 배치"까지 코드에 함께 담는다(키 i).
+// → SNAP 을 LOAD 해도 RESET 으로 진짜 처음까지 돌아갈 수 있다.
+function encodeState(g, moves, initG) {
+  const data = encodeGameObj(g);
+  data.m = moves;
+  if (initG) data.i = encodeGameObj(initG);
   return "CUR:" + btoa(JSON.stringify(data));
 }
 
-function decodeState(code) {
-  let d;
-  try {
-    // 'CUR:' 접두사는 대소문자 구분 없이(cur:, Cur: 등) 떼어내고, 없어도 허용한다.
-    const b64 = String(code).replace(/^\s*cur:/i, "").replace(/\s+/g, "");
-    d = JSON.parse(atob(b64));
-  } catch (e) {
-    throw new Error("현재판 코드를 해석할 수 없어요.");
-  }
+// {t,s,w,f} 평면 객체 -> 게임 상태. 카드 수(52)까지 검증한다.
+function decodeGameObj(d) {
   if (!d || !d.t || !d.s || !d.w || !d.f) throw new Error("현재판 코드 형식이 아니에요.");
   const tab = d.t.map((p) => p.map((a) => ({ s: a[0], r: a[1], up: !!a[2] })));
   const stock = d.s.map((a) => ({ s: a[0], r: a[1], up: false }));
@@ -1675,7 +1780,119 @@ function decodeState(code) {
     tab.reduce((n, p) => n + p.length, 0) + stock.length + waste.length +
     found.reduce((n, p) => n + p.length, 0);
   if (count !== 52) throw new Error("카드 수가 52장이 아니에요 (현재 " + count + "장).");
-  return { game: { tab, stock, waste, found }, moves: d.m || 0 };
+  return { tab, stock, waste, found };
+}
+
+function decodeState(code) {
+  // 새 압축 형식(CUR2:)이면 전용 디코더로. (구버전 CUR: 는 아래 base64 경로)
+  if (/^\s*cur2:/i.test(String(code))) return decodeState2(code);
+  let d;
+  try {
+    // 'CUR:' 접두사는 대소문자 구분 없이(cur:, Cur: 등) 떼어내고, 없어도 허용한다.
+    const b64 = String(code).replace(/^\s*cur:/i, "").replace(/\s+/g, "");
+    d = JSON.parse(atob(b64));
+  } catch (e) {
+    throw new Error("현재판 코드를 해석할 수 없어요.");
+  }
+  const result = { game: decodeGameObj(d), moves: d.m || 0 };
+  // 최초 배치가 함께 담겨 있으면 복원 (구버전 코드엔 없을 수 있음 → 무시)
+  if (d.i) {
+    try { result.init = decodeGameObj(d.i); } catch (e) { /* 손상된 init 은 버린다 */ }
+  }
+  return result;
+}
+
+/* ===========================================================
+   현재 판 압축 코드 (CUR2) — 짧은 텍스트 코덱 (A+B 방식)
+   - 카드 1장 = 글자 1개 (CODE_CHARS, id = s*13 + (r-1))  ← base64 안 씀
+   - 파운데이션은 무늬별 '맨 위 랭크' 1글자로 (A..r 는 자동 복원)
+   - 타블로 각 열 = '뒤집힌 장수(숫자 1개)' + 카드 글자들
+   - 최초 배치(init)는 갓 돌린 새 판이면 52글자 딜 코드로, 아니면 압축 상태로.
+   형식: "CUR2:" tab ~ stock ~ waste ~ found ~ moves [ ~ init ]
+       tab  = 열들(',' 구분), 각 열 = <뒤집힌수><카드글자…>
+       init = 52글자 딜코드(새 판) 또는 위와 같은 5구획 압축 상태(내부에 '~' 포함)
+=========================================================== */
+function cardToChar(c) { return CODE_CHARS[c.s * 13 + (c.r - 1)]; }
+
+// 게임 상태 하나 -> 5구획 압축 문자열 (tab~stock~waste~found~moves)
+function encodeCompactBody(g, moves) {
+  const tab = g.tab
+    .map((col) => {
+      let down = 0;
+      while (down < col.length && !col[down].up) down++;
+      return String(down) + col.map(cardToChar).join("");
+    })
+    .join(",");
+  const stock = g.stock.map(cardToChar).join("");
+  const waste = g.waste.map(cardToChar).join("");
+  // 파운데이션: 무늬별 맨 위 랭크(0~13)를 글자 1개로
+  const found = g.found.map((p) => CODE_CHARS[p.length ? p[p.length - 1].r : 0]).join("");
+  return [tab, stock, waste, found, String(moves)].join("~");
+}
+
+function encodeState2(g, moves, initG) {
+  let body = encodeCompactBody(g, moves);
+  if (initG) {
+    // 새 판이면 52글자 딜 코드가 더 짧다. 아니면 압축 상태를 통째로 덧붙인다.
+    body += "~" + (isFreshDeal(initG) ? encodeDeal(initG) : encodeCompactBody(initG, 0));
+  }
+  return "CUR2:" + body;
+}
+
+// 5구획 문자열 -> 게임 상태 (+moves). 카드 수(52)까지 검증한다.
+function decodeCompactBody(parts) {
+  if (!parts || parts.length < 5) throw new Error("현재판 코드 형식이 아니에요.");
+  const [tabStr, stockStr, wasteStr, foundStr, movesStr] = parts;
+  const idOf = (ch) => {
+    const id = CODE_CHARS.indexOf(ch);
+    if (id < 0) throw new Error("코드에 쓸 수 없는 문자가 있어요: " + ch);
+    return id;
+  };
+  const mkCard = (ch, up) => {
+    const id = idOf(ch);
+    return { s: Math.floor(id / 13), r: (id % 13) + 1, up };
+  };
+  const cols = tabStr.split(",");
+  if (cols.length !== 7) throw new Error("타블로 열 수가 7이 아니에요.");
+  const tab = cols.map((colStr) => {
+    if (colStr.length === 0) throw new Error("현재판 코드 형식이 아니에요.");
+    const down = parseInt(colStr[0], 10);
+    if (isNaN(down)) throw new Error("현재판 코드 형식이 아니에요.");
+    const letters = colStr.slice(1);
+    return [...letters].map((ch, i) => mkCard(ch, i >= down));
+  });
+  const stock = [...stockStr].map((ch) => mkCard(ch, false));
+  const waste = [...wasteStr].map((ch) => mkCard(ch, true));
+  if (foundStr.length !== 4) throw new Error("파운데이션 형식이 아니에요.");
+  const found = [...foundStr].map((ch, s) => {
+    const r = CODE_CHARS.indexOf(ch);
+    if (r < 0 || r > 13) throw new Error("파운데이션 형식이 아니에요.");
+    const pile = [];
+    for (let k = 1; k <= r; k++) pile.push({ s, r: k, up: true });
+    return pile;
+  });
+  const count =
+    tab.reduce((n, p) => n + p.length, 0) + stock.length + waste.length +
+    found.reduce((n, p) => n + p.length, 0);
+  if (count !== 52) throw new Error("카드 수가 52장이 아니에요 (현재 " + count + "장).");
+  return { game: { tab, stock, waste, found }, moves: parseInt(movesStr, 10) || 0 };
+}
+
+function decodeState2(code) {
+  const body = String(code).replace(/^\s*cur2:/i, "").replace(/\s+/g, "");
+  const parts = body.split("~");
+  const main = decodeCompactBody(parts.slice(0, 5));
+  const result = { game: main.game, moves: main.moves };
+  if (parts.length > 5) {
+    const initStr = parts.slice(5).join("~");
+    try {
+      // '~' 가 들어 있으면 압축 상태, 없으면 52글자 딜 코드.
+      result.init = initStr.includes("~")
+        ? decodeCompactBody(initStr.split("~")).game
+        : decodeDeal(initStr);
+    } catch (e) { /* 손상된 init 은 버린다 */ }
+  }
+  return result;
 }
 
 // 진행 중 상태를 현재 게임으로 적용 (이 지점이 '처음으로' 기준이 된다)
@@ -1688,7 +1905,10 @@ function applyState(st) {
   clearTimeout(S.hintTimer);
   $("win").classList.add("hidden");
   S.game = st.game;
-  S.initialState = structuredClone(st.game);
+  // 코드에 최초 배치(init)가 함께 담겨 있으면 그것을 '이 판의 처음'으로 삼는다.
+  // → 스냅 지점에서 시작해도 RESET 으로 진짜 첫 배치까지 돌아갈 수 있다.
+  // 없으면(구버전 코드) 예전처럼 불러온 상태 자체를 처음으로 둔다.
+  S.initialState = structuredClone(st.init || st.game);
   S.moves = st.moves;
   S.history = [];
   S.plan = null;
@@ -1781,16 +2001,18 @@ function openDealModal(mode) {
           "이 판(최초 배치)의 코드예요. 복사해 두면 나중에 ‘LOAD’로 똑같은 판을 다시 플레이할 수 있어요.";
       } else {
         // SNAP 에서 시작한 판은 '최초 배치 딜'이 없다 → 카드 손실 없이
-        // 시작 상태 전체를 담는 코드(SNAP 과 동일 형식)로 저장한다.
-        code = encodeState(S.initialState, 0);
+        // 시작 상태 전체를 담는 압축 코드(CUR2)로 저장한다.
+        code = encodeState2(S.initialState, 0);
         desc.textContent =
           "이 판은 스냅 지점에서 시작했어요. (52글자 딜 코드가 없어) 시작 상태 전체 코드로 저장합니다. ‘LOAD’에 붙여넣으면 이 시작 상태가 그대로 재현돼요.";
       }
     } else {
       if (!S.game) return;
-      code = encodeState(S.game, S.moves);
+      // 최초 배치(initialState)까지 함께 담는다 → 불러온 뒤 RESET 으로 진짜 처음까지 돌아갈 수 있다.
+      // 압축 코드(CUR2)로 저장해 길이를 크게 줄인다.
+      code = encodeState2(S.game, S.moves, S.initialState);
       desc.textContent =
-        "지금 이 순간의 상태(스톡 순서·공개 여부·파운데이션까지) 코드예요. ‘LOAD’에 붙여넣으면 이 상황이 그대로 재현돼요.";
+        "지금 이 순간의 상태(스톡 순서·공개 여부·파운데이션까지)와 이 판의 최초 배치를 함께 담은 코드예요. ‘LOAD’에 붙여넣으면 이 상황이 그대로 재현되고, RESET 으로 이 판의 처음까지 되돌릴 수 있어요.";
     }
     ta.value = code;
     // 자동 복사 시도
@@ -1859,11 +2081,14 @@ function loadDealFromModal() {
     // 클리어 가능 여부 판정은 백그라운드에서 (불가능할 때만 추가 안내)
     const abs = toAbs(S.game);
     const key = serialize(abs);
-    SOLVER.solveAsync(abs).then((plan) => {
+    SOLVER.solveAsync(abs).then((res) => {
       if (serialize(toAbs(S.game)) !== key) return; // 그 사이 상태가 바뀜
-      if (!(plan && plan.length)) {
+      const plan = res && res.plan;
+      if (plan && plan.length) return;                // 가능 → 별도 안내 없음
+      if (res && res.unsolvable) {                    // 확정 불가능일 때만 안내
         toast(what + " 불러왔어요 (이 상태는 클리어 불가능이에요).");
       }
+      // 그 외(판정 미완=모름)에는 거짓 단정하지 않는다.
     });
   } catch (e) {
     msg.textContent = "불러오기 실패: " + e.message +
@@ -1915,14 +2140,27 @@ function runSolvabilityCheck() {
   const abs = toAbs(S.game);
   const key = serialize(abs);
   const token = ++solveToken;
-  SOLVER.solveAsync(abs).then((plan) => {
+  SOLVER.solveAsync(abs).then((res) => {
     if (token !== solveToken) return;             // 더 최근 요청이 있음 → 무시
     if (serialize(toAbs(S.game)) !== key) return; // 그 사이 상태가 바뀜 → 무시
-    if (plan && plan.length) { S.plan = plan; S.planAbs = abs; }
-    const ok = !!(plan && plan.length);
-    el.className = ok ? "prob ok" : "prob bad";
-    el.title = ok ? "클리어 가능" : "클리어 불가능";
-    $("autoBtn").disabled = !ok || S.autoPlaying;
+    const plan = res && res.plan;
+    if (plan && plan.length) {
+      // 🟢 승리 수순을 실제로 찾음 → 확실히 가능
+      S.plan = plan; S.planAbs = abs;
+      el.className = "prob ok";
+      el.title = "클리어 가능";
+      $("autoBtn").disabled = S.autoPlaying;
+    } else if (res && res.unsolvable) {
+      // 🔴 끝까지 다 뒤졌는데도 해답 없음 → 확정 불가능일 때만 빨강
+      el.className = "prob bad";
+      el.title = "클리어 불가능";
+      $("autoBtn").disabled = true;
+    } else {
+      // 🔘 상한에 걸려 결론을 못 냄(모름) → 거짓말하지 않고 '확인 중(회색)' 유지
+      el.className = "prob checking";
+      el.title = "클리어 가능 여부 확인 중…";
+      $("autoBtn").disabled = true;
+    }
   });
 }
 
@@ -2431,7 +2669,7 @@ function newGame() {
   } else {
     // 준비된 판이 아직 없을 때만 잠깐 안내를 띄우고 백그라운드 생성을 기다린다
     overlay.classList.remove("hidden");
-    SOLVER.dealAsync().then((g) => apply(g || dealWinnable()));
+    DEALER.dealAsync().then((g) => apply(g || dealWinnable()));
   }
 }
 
@@ -2523,7 +2761,8 @@ function setupStatic() {
   });
 }
 
-SOLVER.init();   // 솔버 워커(백그라운드 계산) 준비
+SOLVER.init();   // 판정 전담 워커 준비
+DEALER.init();   // 딜 생성 전담 워커 준비
 setupStatic();
 // 저장된 진행 상황이 있으면 이어서, 없으면 새 판으로 시작
 if (restoreSavedGame()) {
