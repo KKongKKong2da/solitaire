@@ -554,8 +554,10 @@ function canPlaceOnPile(card, pile) {
 const S = {
   game: null,        // 실제 게임 상태
   moves: 0,          // 이동 횟수
-  plan: null,        // 남은 추상 수 배열 (승리 플랜 캐시)
+  plan: null,        // 남은 추상 수 배열 (승리 플랜 캐시) — 솔버 판정/자동완성용
   planAbs: null,     // plan[0] 이 적용되는 추상 상태 (== 현재 추상 상태)
+  hintPlan: null,    // 힌트 전용 경로: 가장 가까운 '풀림 유지 진전'까지 최단 수순
+  hintPlanKey: null, // hintPlan 을 계산한 추상 상태의 serialize 키 (신선도 확인용)
   history: [],       // 무제한 되돌리기 스택 ({ g, moves })
   initialState: null,// 이번 판의 최초 배치 (처음으로 돌아가기용)
   autoPlaying: false,// 자동 완성 진행 중 여부
@@ -870,6 +872,75 @@ function solvePlan(abs) {
 }
 
 /* ===========================================================
+   힌트 전용 플랜 (솔버와 분리)
+   - 솔버(solve)는 '이길 수 있나?' 판정 도구로 그대로 두고,
+   - 힌트는 여기서 "가장 가까운, 풀림이 유지되는 유의미한 진전"까지의
+     최단 경로를 너비우선(BFS)으로 직접 찾는다. → 우회로·낭비수가 원리적으로 없음.
+   진전 4종: 공개(reveal) / 빈 칸(empty) / 파운데이션(found) / 스톡 활용(stock).
+   동거리 동점만 고정 순서(reveal>empty>found>stock)로 하나 선택(전략이 아니라 결정론용).
+   각 진전 후보는 '아직 이길 수 있음'을 확인해야만 채택 → '반드시 풀림' 대전제를 절대 깨지 않는다.
+   ※ 확인은 게임의 실제 판정과 '똑같이' 2단계(앞으로만 → 실패 시 되내리기 포함)로 한다.
+     (1단계만 쓰면 되내리기가 필요한 깊은 국면에서 좋은 진전을 거짓 탈락시켜, 힌트가 포기하고
+      솔버 플랜의 뒤섞기로 새는 문제가 생김.)
+=========================================================== */
+const HINT_DEPTH_CAP = 8;      // 진전은 대개 몇 수 안에 있음
+const HINT_TIME_MS = 4500;     // 벽시계 예산(초과 시 지금까지의 최선/폴백)
+const HINT_DOWN_CAP = 500000;  // 되내리기 포함 확인(2단계)의 노드 상한 — 힌트 예산용(F2T_CAP보다 낮춤)
+function computeHintPlan(abs) {
+  const rankKind = { reveal: 0, empty: 1, found: 2, stock: 3 };
+  // 부모 상태 p에서 수 m 이 만드는 진전 종류(없으면 null)
+  function milestoneKind(p, m) {
+    if (m.k === "F") return "found";                 // 파운데이션 진행
+    if (m.k === "T" && m.src === "sw") return "stock"; // 스톡/웨이스트 카드 활용
+    if (m.k === "T" && m.src === "t") {
+      const col = p.T[m.col];
+      if (m.idx > 0 && col[m.idx - 1] && !col[m.idx - 1].up) return "reveal"; // 공개
+      if (m.idx === 0) return "empty";               // 빈 칸
+    }
+    return null;
+  }
+  const t0 = Date.now();
+  // 게임의 실제 판정과 동일한 2단계 풀림 확인:
+  //  1) 앞으로만(빠름) → 2) 실패 시 되내리기(takedown) 포함(무거우므로 힌트용 캡).
+  // 되내리기 탐색 중 예산을 넘기면 보수적으로 false(탈락) — 최악이라도 솔버 폴백이라 안전.
+  function hintWinnable(child) {
+    if (solve(child, FWD_CAP, false, false).plan) return true;
+    if (Date.now() - t0 > HINT_TIME_MS) return false;
+    return !!solve(child, HINT_DOWN_CAP, true, false).plan;
+  }
+  const visited = new Set([hashState(abs)]);
+  let frontier = [{ s: abs, path: [] }];
+  for (let depth = 0; depth < HINT_DEPTH_CAP && frontier.length; depth++) {
+    const next = [];
+    let best = null; // 이 깊이에서 찾은 '풀림 유지 진전' 중 우선순위 최고
+    for (const node of frontier) {
+      const moves = genMoves(node.s, false);
+      for (const m of moves) {
+        const child = applyAbs(node.s, m);
+        const key = hashState(child);
+        if (visited.has(key)) continue;
+        visited.add(key);
+        const path = node.path.concat([m]);
+        const kind = milestoneKind(node.s, m);
+        if (kind) {
+          // 더 좋은 종류일 때만 검증(불필요한 solve 호출 절약)
+          if (!best || rankKind[kind] < rankKind[best.kind]) {
+            if (hintWinnable(child)) best = { kind, path };
+          }
+          // 진전 노드는 더 확장하지 않는다(그 다음 진전은 다음 힌트가 이어감)
+        } else {
+          next.push({ s: child, path });
+        }
+        if (Date.now() - t0 > HINT_TIME_MS) return best ? best.path : null;
+      }
+    }
+    if (best) return best.path; // 이 깊이(=최단)에서 확정
+    frontier = next;
+  }
+  return null; // 예산 안에서 진전 못 찾음 → 호출부가 솔버 플랜으로 폴백
+}
+
+/* ===========================================================
    풀리는 판만 생성
 =========================================================== */
 function dealWinnable() {
@@ -908,6 +979,8 @@ function buildSolverWorkerSource() {
     hashState.toString(),
     solve.toString(),
     solvePlan.toString(),
+    "const HINT_DEPTH_CAP=" + HINT_DEPTH_CAP + ",HINT_TIME_MS=" + HINT_TIME_MS + ",HINT_DOWN_CAP=" + HINT_DOWN_CAP + ";",
+    computeHintPlan.toString(),
     freshDeck.toString(),
     shuffle.toString(),
     layout.toString(),
@@ -916,6 +989,7 @@ function buildSolverWorkerSource() {
     "onmessage=function(e){var d=e.data,r=null;" +
       "if(d.type==='deal'){r=dealWinnable();}" +
       "else if(d.type==='solve'){r=solvePlan(d.abs);}" +
+      "else if(d.type==='hint'){r=computeHintPlan(d.abs);}" +
       "postMessage({id:d.id,result:r});};",
   ].join("\n");
 }
@@ -949,6 +1023,7 @@ function makeWorkerClient() {
           // 동기 폴백 (멈춤이 생길 수 있지만 결과는 동일)
           if (msg.type === "deal") resolve(dealWinnable());
           else if (msg.type === "solve") resolve(solvePlan(msg.abs));
+          else if (msg.type === "hint") resolve(computeHintPlan(msg.abs));
           else resolve(null);
           return;
         }
@@ -958,6 +1033,7 @@ function makeWorkerClient() {
       });
     },
     solveAsync(abs) { return this._req({ type: "solve", abs }); },
+    hintAsync(abs) { return this._req({ type: "hint", abs }); },
     dealAsync() { return this._req({ type: "deal" }); },
   };
 }
@@ -997,6 +1073,33 @@ function ensurePlan() {
       S.planAbs = abs;
     }
     return S.plan && S.plan.length ? S.plan : null;
+  });
+}
+
+/* 힌트가 실제로 안내할 수순: 신선한 힌트 전용 플랜이 있으면 그것, 없으면 솔버 플랜. */
+function hintMoves() {
+  if (S.hintPlan && S.hintPlan.length && S.hintPlanKey === serialize(toAbs(S.game)))
+    return S.hintPlan;
+  return S.plan;
+}
+
+/* 현재 상태의 '힌트 전용 최단 진전 경로'를 보장. 못 찾으면 솔버 플랜으로 폴백.
+   (계산은 워커에서, 5초 예산. 화면은 멈추지 않는다.) */
+function ensureHintPlan() {
+  const abs = toAbs(S.game);
+  const key = serialize(abs);
+  if (S.hintPlan && S.hintPlan.length && S.hintPlanKey === key)
+    return Promise.resolve(S.hintPlan);
+  return SOLVER.hintAsync(abs).then((path) => {
+    if (serialize(toAbs(S.game)) !== key) return hintMoves(); // 그 사이 상태 변함
+    if (path && path.length) {
+      S.hintPlan = path;
+      S.hintPlanKey = key;
+      return S.hintPlan;
+    }
+    S.hintPlan = null;      // 진전 경로 못 찾음
+    S.hintPlanKey = null;
+    return ensurePlan();    // → 솔버 플랜으로 폴백
   });
 }
 
@@ -1468,6 +1571,100 @@ function closeHintPanel() {
   clearHints();
 }
 
+/* ---- 힌트 해설 도우미 (설명 전용: 수 선택/승리 판정엔 일절 관여하지 않음) ---- */
+
+// 이 카드가 '지금' 화면에 이미 보이는가(웨이스트 맨 위 또는 타블로 앞면).
+// 계획 앞보기로 알게 된 카드 이름을 문구에 넣을 때, 숨은 카드 정보 누설을 막는 방패.
+function isCardVisibleNow(card) {
+  if (!card) return false;
+  const w = S.game.waste;
+  if (w.length) {
+    const t = w[w.length - 1];
+    if (t.s === card.s && t.r === card.r) return true;
+  }
+  for (const p of S.game.tab)
+    for (const c of p)
+      if (c.up && c.s === card.s && c.r === card.r) return true;
+  return false;
+}
+
+// 이 카드 위에 실제로 올려질 수 있는 상대색 (r-1)이 아직 게임에 남아있는가?
+// 두 장 다 이미 파운데이션이면 '다리'는 공허 → 그 문구를 쓰지 않는다.
+function receiverStillExists(card) {
+  const need = card.r - 1;
+  if (need < 1) return false;
+  const opp = isRed(card.s) ? [0, 3] : [1, 2];
+  return !opp.every((s) => S.game.found[s].length >= need);
+}
+
+// 추천 수(hintPlan[0]) 이후를 '힌트 전용 최단 경로 그대로' 시뮬레이션하며, 이 수가 여는 목적을 찾는다.
+// 반환: {kind:'reveal',col,card?} | {kind:'empty',col} | {kind:'found',card} | {kind:'stock',card} | null
+// 힌트 플랜은 '가장 가까운 진전'에서 끝나므로 여기서 잡히는 목적은 항상 near(먼 목적 문제 없음).
+// 힌트가 솔버 플랜으로 폴백한 경우(S.hintPlan 없음)엔 null → 국소(즉시) 해설로 넘긴다.
+// applyAbs 는 새 상태를 반환(원본 불변)하므로 이 조회는 판을 바꾸지 않는다.
+function movePurpose() {
+  const plan = S.hintPlan;
+  if (!plan || plan.length < 2 || S.hintPlanKey !== serialize(toAbs(S.game))) return null;
+  let reveal = null, empty = null, found = null, stock = null;
+  let s = toAbs(S.game);
+  for (let i = 0; i < plan.length; i++) {
+    const mv = plan[i];
+    const before = s;
+    s = applyAbs(s, mv);
+    if (i === 0) continue; // 추천 수 자신의 '즉시효과'는 위쪽 분기에서 이미 처리
+    if (mv.k === "T" && mv.src === "t") {
+      const p = before.T[mv.col];
+      if (!reveal && mv.idx > 0 && p[mv.idx - 1] && !p[mv.idx - 1].up)
+        reveal = { kind: "reveal", col: mv.col, card: p[mv.idx] };
+      if (!empty && mv.idx === 0) empty = { kind: "empty", col: mv.col };
+    } else if (mv.k === "F" && mv.src === "t") {
+      const p = before.T[mv.col];
+      const top = p[p.length - 1];
+      if (!reveal && p.length > 1 && p[p.length - 2] && !p[p.length - 2].up)
+        reveal = { kind: "reveal", col: mv.col, card: top };
+      if (!empty && p.length === 1) empty = { kind: "empty", col: mv.col };
+      if (!found) found = { kind: "found", card: top };
+    } else if (mv.k === "F" && mv.src === "sw") {
+      if (!found) found = { kind: "found", card: mv.card };
+    } else if (mv.k === "T" && mv.src === "sw") {
+      if (!stock) stock = { kind: "stock", card: mv.card };
+    }
+  }
+  return reveal || empty || found || stock;
+}
+
+// movePurpose() 결과를 사람 문구(why/principle)로 바꾼다. 없으면 null.
+// 규칙: 줄 번호는 항상 밝히되, 카드 이름은 '지금 보이는' 카드일 때만(누설 방지).
+//       스톡 카드는 기존 '스톡 넘기기 → X 찾기'와 같은 방침이라 이름을 밝혀도 된다.
+function purposeText() {
+  const p = movePurpose();
+  if (!p) return null;
+  if (p.kind === "reveal") {
+    const nm = isCardVisibleNow(p.card) ? `${cardLabel(p.card)} 를 ` : "카드를 ";
+    return {
+      why: `지금 당장은 티가 안 나도, 이후에 ${p.col + 1}번째 줄의 ${nm}옮겨 그 아래 숨은 카드를 깔 수 있게 하는 준비 수예요.`,
+      principle: "먼 이득(숨은 카드 공개)을 위한 준비 수.",
+    };
+  }
+  if (p.kind === "empty") {
+    return {
+      why: `지금 당장은 티가 안 나도, 이후에 ${p.col + 1}번째 줄을 비워 빈 칸(King 자리)을 만들기 위한 준비 수예요.`,
+      principle: "먼 이득(빈 칸 만들기)을 위한 준비 수.",
+    };
+  }
+  if (p.kind === "found") {
+    const nm = isCardVisibleNow(p.card) ? `${cardLabel(p.card)} 를 ` : "카드를 ";
+    return {
+      why: `지금 당장은 티가 안 나도, 이후에 ${nm}파운데이션에 올리기 위한 준비 수예요.`,
+      principle: "먼 이득(파운데이션 진행)을 위한 준비 수.",
+    };
+  }
+  return {
+    why: `지금 당장은 티가 안 나도, 이후에 스톡의 ${cardLabel(p.card)} 를 활용하기 위한 자리를 만드는 준비 수예요.`,
+    principle: "스톡 카드를 쓰기 위한 자리 만들기.",
+  };
+}
+
 // 다음 수 m(또는 드로우)에 대한 "무엇/왜/원칙" 해설을 만든다.
 function explainMove(m, isDraw) {
   if (isDraw) {
@@ -1559,7 +1756,17 @@ function explainMove(m, isDraw) {
         principle: "빈 칸은 King 전용 자원.",
       };
     }
-    if (recv) {
+    // 당장의 티는 안 나지만 계획상 이 수가 여는 '먼 목적'을 우선 설명한다.
+    const purpose = purposeText();
+    if (purpose) {
+      return {
+        title: `${cardLabel(movingCard)} → ${tabDestLabel(m.to)}`,
+        why: purpose.why,
+        principle: purpose.principle,
+      };
+    }
+    // '다리' 문구는 받을 상대색 (r-1)이 아직 남아있을 때만(둘 다 파운데이션이면 공허).
+    if (recv && receiverStillExists(runTop)) {
       return {
         title: `${cardLabel(movingCard)} → ${tabDestLabel(m.to)}`,
         why: `이 카드를 옮기면 그 위에 ${recv} 를 받을 수 있어요. 다음 카드가 안착할 다리를 미리 만드는 수예요.`,
@@ -1568,8 +1775,8 @@ function explainMove(m, isDraw) {
     }
     return {
       title: `${cardLabel(movingCard)} → ${tabDestLabel(m.to)}`,
-      why: `카드를 알맞은 자리로 옮겨 순서를 정리합니다.`,
-      principle: "다리를 만들어 다음 수를 준비한다.",
+      why: `카드를 알맞은 자리로 옮겨 순서를 정리하는 수예요.`,
+      principle: "다음 수를 위한 정리.",
     };
   }
   // m.src === "sw" (웨이스트 맨 위 카드를 타블로로)
@@ -1582,7 +1789,15 @@ function explainMove(m, isDraw) {
       principle: "빈 칸은 King 전용 자원.",
     };
   }
-  if (recvW) {
+  const purposeW = purposeText();
+  if (purposeW) {
+    return {
+      title: `${cardLabel(m.card)} → ${tabDestLabel(m.to)}`,
+      why: purposeW.why,
+      principle: purposeW.principle,
+    };
+  }
+  if (recvW && receiverStillExists(m.card)) {
     return {
       title: `${cardLabel(m.card)} → ${tabDestLabel(m.to)}`,
       why: `웨이스트의 이 카드를 타블로에 놓으면 그 위에 ${recvW} 를 받을 수 있어요.`,
@@ -2539,11 +2754,12 @@ function presentHint(m) {
 // 끝까지 누르면 클리어(자동 완성/승리 처리)로 이어진다.
 function hintNext() {
   if (S.autoPlaying || S.hinting) return; // 자동 진행/스톡 자동 넘김 중엔 무시
-  if (!S.plan || !S.plan.length) {
+  const plan = hintMoves();
+  if (!plan || !plan.length) {
     showHint(); // 플랜이 없으면 먼저 계산해 보여줌
     return;
   }
-  performAbstractMove(S.plan[0]); // 추천 수 실행 (+ afterMove 에서 plan 전진)
+  performAbstractMove(plan[0]); // 추천 수 실행 (+ afterMove 에서 plan 갱신)
   // 클리어면 onWin/자동완성이 처리(클리어 화면). 아니면 다음 수 표시.
   if (!isWin() && !S.autoPlaying) showHint();
 }
@@ -2551,21 +2767,18 @@ function hintNext() {
 function showHint() {
   if (S.hinting || S.autoPlaying) return;
   clearHints();
-  // 플랜은 보통 매 수마다 백그라운드에서 미리 계산돼 있어 즉시 표시된다.
-  // 아직 없으면 백그라운드에서 계산한 뒤 이어서 보여준다(화면 멈춤 없음).
-  if (!S.plan || !S.plan.length) {
-    ensurePlan().then(() => {
-      if (!S.hinting && !S.autoPlaying) showHintWithPlan();
-    });
-    return;
-  }
-  showHintWithPlan();
+  // 힌트 전용 최단 진전 경로를 계산(없으면 솔버 플랜 폴백)한 뒤 보여준다.
+  // 워커에서 돌아 화면은 안 멈춘다(최대 5초).
+  ensureHintPlan().then(() => {
+    if (!S.hinting && !S.autoPlaying) showHintWithPlan();
+  });
 }
 
 function showHintWithPlan() {
   if (S.hinting || S.autoPlaying) return;
   clearHints();
-  if (!S.plan || !S.plan.length) {
+  const plan = hintMoves();
+  if (!plan || !plan.length) {
     $("tutNextBtn").style.display = "none";
     showHintPanel(true);
     hintSay(
@@ -2576,7 +2789,7 @@ function showHintWithPlan() {
     );
     return;
   }
-  const m = S.plan[0];
+  const m = plan[0];
   const wasteTop = S.game.waste.length ? S.game.waste[S.game.waste.length - 1] : null;
   const same = (c, card) => c && card && c.s === card.s && c.r === card.r;
 
